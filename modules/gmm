@@ -1,0 +1,188 @@
+using LinearAlgebra, Random, Clustering, CSV, Statistics, Plots
+
+export run_gmm
+
+
+function sqeuclidean(x, y)
+    return sum((x .- y).^2)
+end
+
+function logsumexp(arr)
+    max_val = maximum(arr)
+    return max_val + log(sum(exp.(arr .- max_val)))
+end
+
+function initialize_gmm(X, k)
+    kmeans_result = kmeans(X', k)  
+    means = kmeans_result.centers'
+    weights = fill(1/k, k)
+    
+    # Utiliser des matrices de covariance mieux estimées
+    covariances = [cov(X[kmeans_result.assignments .== j, :], dims=1) + I*1e-6 for j in 1:k]
+    
+    return means, covariances, weights
+end
+
+
+# Fonction pour l'étape E (Expectation) de l'algorithme EM
+function e_step(X, means, covariances, weights)
+    n_samples, n_features = size(X)
+    n_components = length(weights)
+    responsibilities = zeros(n_samples, n_components)
+
+    for i in 1:n_samples
+        log_probs = zeros(n_components)
+        for j in 1:n_components
+            diff = X[i, :] .- means[j, :]
+            log_det_cov = logdet(covariances[j])
+            exponent = -0.5 * (diff' * inv(covariances[j]) * diff)
+            log_probs[j] = log(weights[j]) - 0.5 * (log_det_cov + n_features * log(2π)) + exponent
+        end
+        log_probs .-= maximum(log_probs)  # Stabilisation numérique
+        responsibilities[i, :] = exp.(log_probs)
+        responsibilities[i, :] ./= sum(responsibilities[i, :])
+    end
+    return responsibilities
+end
+
+
+
+function m_step(X, responsibilities, cov_floor=1e-6)  
+    n_samples = size(X, 1)
+    n_components = size(responsibilities, 2)
+
+    new_weights = zeros(n_components)
+    new_means = zeros(n_components, size(X, 2))
+    new_covariances = Array{Matrix{Float64}}(undef, n_components)
+
+    for j in 1:n_components
+        cluster_size = sum(responsibilities[:, j])
+        if cluster_size < 10  
+            println("Réinitialisation du cluster $j")
+            new_means[j, :] = X[rand(1:n_samples), :]  
+            new_covariances[j] = cov(X, dims=1) + I*1e-6  # Plutôt qu'une variance diagonale arbitraire
+            new_weights[j] = 1.0 / n_components  
+            continue
+        end
+        
+
+        new_weights[j] = cluster_size / n_samples
+        weighted_sum = zeros(size(X, 2))
+        for i in 1:n_samples
+            weighted_sum += responsibilities[i, j] * X[i, :]
+        end
+        new_means[j, :] = weighted_sum / cluster_size
+
+        covariance_matrix = zeros(size(X, 2), size(X, 2))
+        for i in 1:n_samples
+            diff = X[i, :] .- new_means[j, :]
+            covariance_matrix += responsibilities[i, j] * (diff * diff')
+        end
+        new_covariances[j] = covariance_matrix / cluster_size 
+        
+        # Correction de l'erreur ici :
+        new_covariances[j] += diagm(ones(size(X,2)) * cov_floor)
+    end
+
+    return new_weights, new_means, new_covariances
+end
+
+
+# Fonction principale pour l'algorithme EM pour GMM
+function em_gmm(X, k; max_iter=1000, tol=1e-5, patience=5)
+    n_samples, n_features = size(X)
+
+    # Initialisation
+    means, covariances, weights = initialize_gmm(X, k)
+    log_likelihood_history = Float64[]
+    prev_log_likelihood = -Inf
+    no_improve_count = 0
+
+    for iter in 1:max_iter
+        responsibilities = e_step(X, means, covariances, weights)
+        weights, means, covariances = m_step(X, responsibilities)
+
+        # Calcul de la log-vraisemblance (corrigé)
+        log_likelihood = 0.0
+        for i in 1:n_samples
+            likelihood_i = 0.0
+            for j in 1:k
+                diff = X[i, :] - means[j, :]
+                log_det_cov = logdet(covariances[j])
+                exponent = -0.5 * (diff' * inv(covariances[j]) * diff)
+                likelihood_i += weights[j] * exp(-0.5 * (log_det_cov + n_features * log(2π)) + exponent)
+            end
+            log_likelihood += log(likelihood_i)
+        end
+        push!(log_likelihood_history, log_likelihood)
+
+        # Vérification de la convergence
+        if iter > 1
+            if abs((log_likelihood - prev_log_likelihood) / log_likelihood) < tol
+                no_improve_count += 1
+                if no_improve_count >= patience
+                    println("Convergence atteinte après $iter itérations.")
+                    break
+                end
+            else
+                no_improve_count = 0
+            end
+        end
+        prev_log_likelihood = log_likelihood
+    end
+
+    return means, covariances, weights, log_likelihood_history
+end
+
+# Fonction d'exécution de GMM
+function run_gmm(data_path::String, k::Int)
+    println("\n🔄 Exécution de GMM...")
+    results_dir = "output/results/gmm"
+    mkpath(results_dir)
+    
+    # Chargement des données
+    data = CSV.read(data_path, DataFrame)
+    X = Matrix(data[:, ["V1", "V2"]])
+    
+    println("Size of X: $(size(X))")
+    println("Type of X: $(typeof(X))")
+    
+    # Initialisation du GMM
+    means, covariances, weights, log_likelihood_history = em_gmm(X, k)
+    
+    # Attribution des clusters
+    n_samples = size(X, 1)
+    cluster_assignments = zeros(Int, n_samples)
+    for i in 1:n_samples
+        probabilities = [weights[j] * exp(-0.5 * (X[i, :] .- means[j, :])' * inv(covariances[j]) * (X[i, :] .- means[j, :])) for j in 1:k]
+        cluster_assignments[i] = argmax(probabilities)
+    end
+    
+    # Sauvegarde des résultats
+    labels_df = DataFrame(ID=1:length(cluster_assignments), Cluster=cluster_assignments)
+    CSV.write(joinpath(results_dir, "gmm_labels.csv"), labels_df)
+    
+    # Visualisation
+    plot_file = joinpath(results_dir, "gmm_plot.png")
+    plot_gmm_clusters(X, means, covariances, cluster_assignments, plot_file)
+    
+    println("✅ GMM terminé")
+    return means, covariances, weights, cluster_assignments
+end
+
+# Fonction de visualisation des clusters
+function plot_gmm_clusters(X, means, covariances, cluster_assignments, plot_file)
+    scatter(X[:, 1], X[:, 2], group=cluster_assignments, xlabel="V1", ylabel="V2", title="Clusters GMM")
+    scatter!(means[:, 1], means[:, 2], color=:black, markersize=6, label="Centres")
+    
+    # Ajouter des ellipses représentant les distributions gaussiennes
+    for j in 1:size(means, 1)
+        eigvals, eigvecs = eigen(covariances[j])
+        angles = range(0, 2π, length=100)
+        ellipse = [means[j, :] .+ (sqrt(eigvals[1]) * cos(θ)) * eigvecs[:, 1] .+ (sqrt(eigvals[2]) * sin(θ)) * eigvecs[:, 2] for θ in angles]
+        ellipse = hcat(ellipse...)'
+        plot!(ellipse[:, 1], ellipse[:, 2], lw=2, color=:black, label="")
+    end
+    
+    savefig(plot_file)
+end

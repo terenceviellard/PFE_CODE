@@ -1,0 +1,62 @@
+using CSV, DataFrames, LinearAlgebra, Random, Clustering, Statistics
+
+include("gmm")  # Inclusion du module GMM
+
+export run_comparateur_gmm
+
+function compute_bic(X, k)
+    means, covariances, weights, log_likelihood_history = em_gmm(X, k)
+    n_samples, n_features = size(X)
+    
+    # Nombre total de paramètres du modèle
+    num_params = k * n_features  # Moyennes
+    num_params += k * n_features * (n_features + 1) ÷ 2  # Matrices de covariance
+    num_params += k - 1  # Poids (k-1 car ils doivent somme à 1)
+    
+    # Calcul du BIC
+    log_likelihood = log_likelihood_history[end]
+    bic = -2 * log_likelihood + num_params * log(n_samples)
+    
+    return bic
+end
+
+function run_comparateur_gmm(data_path::String, k_min::Int, k_max::Int)
+    println("\n🔄 Recherche du meilleur k pour GMM avec BIC...")
+    
+    # Chargement des données
+    data = CSV.read(data_path, DataFrame)
+    X = Matrix(data[:, ["V1", "V2"]])
+    
+    best_k = k_min
+    best_bic = Inf
+    bic_scores = Dict{Int, Float64}() # Utilisation d'un Dict pour stocker les scores BIC
+    
+    for k in k_min:k_max
+        bic = compute_bic(X, k)
+        bic_scores[k] = bic
+        println("BIC pour k = $k : $bic")
+        if bic < best_bic
+            best_bic = bic
+            best_k = k
+        end
+    end
+    
+    println("✅ Nombre optimal de clusters (GMM) trouvé : k = $best_k")
+    
+    # Création du DataFrame pour enregistrer les résultats
+    results_df = DataFrame(k = collect(keys(bic_scores)), BIC = collect(values(bic_scores)))
+    
+    # Création du dossier output si il n'existe pas
+    output_dir = "output/results/gmm"
+    if !isdir(output_dir)
+        mkdir(output_dir)
+    end
+    
+    # Enregistrement des résultats dans un fichier CSV
+    output_file = joinpath(output_dir, "gmm_bic_results.csv")
+    CSV.write(output_file, results_df)
+    
+    println("✅ Résultats BIC enregistrés dans : $output_file")
+    
+    return best_k
+end
