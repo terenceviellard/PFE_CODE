@@ -1,0 +1,33 @@
+using CSV, DataFrames, Clustering, Plots
+
+export run_kmeans
+
+# Fonction d'exécution de K-means
+function run_kmeans(data_path::String, k::Int)
+    println("\n🔄 Exécution de K-means...")
+    results_dir = "output/results/kmeans"
+    mkpath(results_dir)
+    # Chargement des données
+    data = CSV.read(data_path, DataFrame)
+    X = Matrix(data[:, ["V1", "V2"]])
+    
+    println("Size of X: $(size(X))")
+    println("Type of X: $(typeof(X))")
+    
+    # Clustering k-means
+    kmeans_result = kmeans(X', k)
+    kmeans_labels = assignments(kmeans_result)
+
+    labels_df = DataFrame(ID=1:length(kmeans_labels), Cluster=kmeans_labels)
+    CSV.write(joinpath(results_dir, "kmeans_labels.csv"), labels_df)
+    # Visualisation
+    plot_file = joinpath(results_dir, "kmeans_plot.png")
+    scatter(X[:, 1], X[:, 2], group = kmeans_labels, 
+            xlabel = "Column 1", ylabel = "Column 2",
+            title = "Clustering k-means")
+    
+    savefig(plot_file)
+
+    println("✅ K-means terminé")
+    return kmeans_result, kmeans_labels
+end
